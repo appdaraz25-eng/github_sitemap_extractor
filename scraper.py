@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 EXECUTION_MODE = "threadpool"
 
 # Sites file — sits in repo root alongside scraper.py
-SITES_FILE = "newsstes.txt"
+SITES_FILE = "news_sites_list.txt"
 
 # .db files folder — committed back to the repo after every run
 DB_FOLDER = "data"
@@ -71,7 +71,7 @@ AUTO_GIT_PUSH = True
 
 
 # =============================================================================
-#  Load sites from newsstes.txt
+#  Load sites from news_sites_list.txt
 # =============================================================================
 
 def load_sites_from_file(filepath: str) -> List[Dict]:
