@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 #  CONFIGURATION
 # =============================================================================
 
-# Execution mode: "threadpool" (default) | "asyncio" | "normal"
-EXECUTION_MODE = "threadpool"
+# Execution mode: "threadpool" (default) | "threadpool" | "normal"
+EXECUTION_MODE = "asyncio"
 
 # Sites are loaded from this file (one URL per line, lines starting with # ignored)
 SITES_FILE = SITES_FILE = "output/newsstes.txt"
