@@ -1,6 +1,6 @@
 # One site per line
-https://prothomalo.com
 https://bangla.thedailystar.net
+https://thedailycampus.com
 https://dailyamardesh.com
 https://banglaedition.com
 https://www.prothomalo.com
@@ -15,6 +15,7 @@ https://www.dailynayadiganta.com
 https://www.dailyjanakantha.com
 https://www.dainikamadershomoy.com
 https://www.bhorerkagoj.com
+https://www.tbsnews.net/bangla
 https://www.jjdin.com
 https://www.bonikbarta.net
 https://www.kalbela.com
@@ -25,6 +26,7 @@ https://www.ajkerpatrika.com
 https://www.manobkantha.com.bd
 https://bangla.bdnews24.com
 https://www.banglanews24.com
+https://bartabazar.com
 https://www.jagonews24.com
 https://www.dhakapost.com
 https://www.banglatribune.com
