@@ -14,12 +14,13 @@ from datetime import datetime
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from dateutil import parser as date_parser
 import warnings
+import subprocess
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # Create required directories before logging starts
 os.makedirs("logs",   exist_ok=True)
-os.makedirs("output", exist_ok=True)
+os.makedirs("data",   exist_ok=True)   # .db files live here (committed to repo)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,46 +37,48 @@ logger = logging.getLogger(__name__)
 #  CONFIGURATION
 # =============================================================================
 
-# Execution mode: "threadpool" (default) | "threadpool" | "normal"
-EXECUTION_MODE = "asyncio"
+# Execution mode: "threadpool" (default) | "asyncio" | "normal"
+EXECUTION_MODE = "threadpool"
 
-# Sites are loaded from this file (one URL per line, lines starting with # ignored)
-SITES_FILE = SITES_FILE = "output/newsstes.txt"
+# Sites file — sits in repo root alongside scraper.py
+SITES_FILE = "newsstes.txt"
+
+# .db files folder — committed back to the repo after every run
+DB_FOLDER = "data"
 
 # Max DB shard size in bytes (100 MB)
 MAX_DB_BYTES = 100 * 1024 * 1024
 
-# ThreadPool workers (used when EXECUTION_MODE = "threadpool")
-MAX_WORKERS = 30
+# ThreadPool workers
+MAX_WORKERS = 20
 
-# Asyncio concurrency (used when EXECUTION_MODE = "asyncio")
+# Asyncio concurrency
 ASYNCIO_CONCURRENCY = 50
 
 # Batch size for processing URLs
 BATCH_SIZE = 50
 
-# Percentage of URLs to process per site (100.0 = all)
-PROCESS_PERCENTAGE = 1.0
+# Percentage of NEW urls to process per run (100.0 = all new urls)
+PROCESS_PERCENTAGE = 100.0
 
-# Save failed URLs to DB? True | False
+# Save failed URLs to DB so they are never retried
 SAVE_FAILED_URLS = True
 
+# Commit and push .db files back to GitHub after each site finishes
+AUTO_GIT_PUSH = True
+
 # =============================================================================
 
 
 # =============================================================================
-#  Load sites from newssites.txt
+#  Load sites from newsstes.txt
 # =============================================================================
 
 def load_sites_from_file(filepath: str) -> List[Dict]:
     if not os.path.exists(filepath):
-        # Create a sample file so the user knows what to do
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write("# Add one news site URL per line\n")
             f.write("# Lines starting with # are ignored\n")
-            f.write("# Example:\n")
-            f.write("# https://prothomalo.com\n")
-            f.write("# https://bdnews24.com\n")
             f.write("https://prothomalo.com\n")
             f.write("https://bdnews24.com\n")
         logger.info(f"Created sample {filepath} — edit it and re-run.")
@@ -92,7 +95,8 @@ def load_sites_from_file(filepath: str) -> List[Dict]:
                             domain.replace('https://', '').replace('http://', ''))
             sites.append({
                 "domain":             domain,
-                "db_file":            f"output/{safe}.db",
+                # All .db files go inside data/ folder which is committed to repo
+                "db_file":            os.path.join(DB_FOLDER, f"{safe}.db"),
                 "process_percentage": PROCESS_PERCENTAGE,
             })
     logger.info(f"Loaded {len(sites)} site(s) from {filepath}")
@@ -100,10 +104,70 @@ def load_sites_from_file(filepath: str) -> List[Dict]:
 
 
 # =============================================================================
+#  Git helpers — commit & push .db files back to the repo
+# =============================================================================
+
+def _git_commit_and_push(db_file: str, domain: str):
+    """
+    Stages the .db file (and any shards) then commits and pushes.
+    Works on GitHub Actions because the repo is already checked out
+    with write access via GITHUB_TOKEN.
+    """
+    if not AUTO_GIT_PUSH:
+        return
+    try:
+        # Configure git identity (required on GitHub Actions)
+        subprocess.run(
+            ["git", "config", "user.email", "actions@github.com"],
+            check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "GitHub Actions"],
+            check=True, capture_output=True
+        )
+
+        # Stage all .db files in data/ (catches shards like 1site.db, 2site.db …)
+        subprocess.run(
+            ["git", "add", "data/*.db"],
+            check=True, capture_output=True
+        )
+
+        # Check if there is anything to commit
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            logger.info(f"[git] No changes to commit for {domain}")
+            return
+
+        commit_msg = f"chore: update scraped data for {domain} [{datetime.now().strftime('%Y-%m-%d %H:%M')} UTC]"
+        subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            check=True, capture_output=True
+        )
+
+        # Pull first to avoid rejection (other sites may have pushed already)
+        subprocess.run(
+            ["git", "pull", "--rebase", "origin", "main"],
+            check=True, capture_output=True
+        )
+
+        subprocess.run(
+            ["git", "push", "origin", "main"],
+            check=True, capture_output=True
+        )
+        logger.info(f"[git] Pushed updated .db for {domain}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[git] Push failed for {domain}: {e.stderr.decode()[:300]}")
+
+
+# =============================================================================
 #  DB helpers
 # =============================================================================
 
 def _get_active_db(base_db_file: str) -> str:
+    """Return the current shard to write to (creates a new one if full)."""
     if not os.path.exists(base_db_file) or os.path.getsize(base_db_file) < MAX_DB_BYTES:
         return base_db_file
     directory = os.path.dirname(base_db_file) or "."
@@ -117,9 +181,10 @@ def _get_active_db(base_db_file: str) -> str:
 
 
 def _all_db_files(base_db_file: str) -> List[str]:
+    """Return all shard paths that exist for a given base db file."""
     directory = os.path.dirname(base_db_file) or "."
     name, ext = os.path.splitext(os.path.basename(base_db_file))
-    files = [f for f in [base_db_file] if os.path.exists(f)]
+    files = [base_db_file] if os.path.exists(base_db_file) else []
     idx = 1
     while True:
         candidate = os.path.join(directory, f"{idx}{name}{ext}")
@@ -132,49 +197,96 @@ def _all_db_files(base_db_file: str) -> List[str]:
 
 
 def _init_db(db_path: str):
+    """Create tables and indexes if they don't exist yet."""
     conn = sqlite3.connect(db_path)
     conn.execute('''
         CREATE TABLE IF NOT EXISTS news_articles (
-            url             TEXT PRIMARY KEY,
+            url             TEXT PRIMARY KEY,   -- PRIMARY KEY enforces uniqueness
             title           TEXT,
             published_date  TEXT,
-            article_content TEXT
+            article_content TEXT,
+            scraped_at      TEXT               -- timestamp when row was inserted
         )
     ''')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS failed_urls (
-            url         TEXT PRIMARY KEY,
+            url         TEXT PRIMARY KEY,       -- PRIMARY KEY enforces uniqueness
             reason      TEXT,
             failed_at   TEXT
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_published_date ON news_articles(published_date)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_scraped_at     ON news_articles(scraped_at)')
     conn.commit()
     conn.close()
 
 
 def _load_all_existing_urls(base_db_file: str) -> Set[str]:
-    existing = set()
+    """
+    Load every URL (successful + failed) from ALL shards.
+    This is the master deduplication set — any URL already here is skipped.
+    """
+    existing: Set[str] = set()
     for db_path in _all_db_files(base_db_file):
         try:
             conn = sqlite3.connect(db_path)
-            existing.update(r[0] for r in conn.execute("SELECT url FROM news_articles").fetchall())
-            existing.update(r[0] for r in conn.execute("SELECT url FROM failed_urls").fetchall())
+            existing.update(
+                r[0] for r in conn.execute("SELECT url FROM news_articles").fetchall()
+            )
+            existing.update(
+                r[0] for r in conn.execute("SELECT url FROM failed_urls").fetchall()
+            )
             conn.close()
         except Exception as e:
             logger.error(f"Error reading {db_path}: {e}")
     return existing
 
 
+def _url_exists_in_any_shard(base_db_file: str, url: str) -> bool:
+    """Extra safety check — confirm a single URL is not already stored."""
+    for db_path in _all_db_files(base_db_file):
+        try:
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT 1 FROM news_articles WHERE url=? LIMIT 1", (url,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return True
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT 1 FROM failed_urls WHERE url=? LIMIT 1", (url,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _insert_article(base_db_file: str, m: Dict):
+    """
+    Append a new article row — INSERT OR IGNORE means duplicate URLs are
+    silently skipped at the database level (second line of defence after
+    the in-memory set check).
+    """
     active = _get_active_db(base_db_file)
     os.makedirs(os.path.dirname(active) or ".", exist_ok=True)
     _init_db(active)
     conn = sqlite3.connect(active)
     try:
         conn.execute(
-            'INSERT OR IGNORE INTO news_articles (url, title, published_date, article_content) VALUES (?, ?, ?, ?)',
-            (m['url'], (m.get('title') or '')[:500], m.get('published_date') or None, m['article_content'])
+            '''INSERT OR IGNORE INTO news_articles
+               (url, title, published_date, article_content, scraped_at)
+               VALUES (?, ?, ?, ?, ?)''',
+            (
+                m['url'],
+                (m.get('title') or '')[:500],
+                m.get('published_date') or None,
+                m['article_content'],
+                datetime.utcnow().isoformat()
+            )
         )
         conn.commit()
     finally:
@@ -182,6 +294,10 @@ def _insert_article(base_db_file: str, m: Dict):
 
 
 def _insert_failed(base_db_file: str, url: str, reason: str):
+    """
+    Record a failed URL — INSERT OR IGNORE means it will never be
+    duplicated even across multiple runs.
+    """
     if not SAVE_FAILED_URLS:
         return
     active = _get_active_db(base_db_file)
@@ -191,11 +307,30 @@ def _insert_failed(base_db_file: str, url: str, reason: str):
     try:
         conn.execute(
             'INSERT OR IGNORE INTO failed_urls (url, reason, failed_at) VALUES (?, ?, ?)',
-            (url, reason[:500], datetime.now().isoformat())
+            (url, reason[:500], datetime.utcnow().isoformat())
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def _db_stats(base_db_file: str) -> Dict:
+    """Return total article count and failed count across all shards."""
+    total_articles = 0
+    total_failed   = 0
+    for db_path in _all_db_files(base_db_file):
+        try:
+            conn = sqlite3.connect(db_path)
+            total_articles += conn.execute(
+                "SELECT COUNT(*) FROM news_articles"
+            ).fetchone()[0]
+            total_failed += conn.execute(
+                "SELECT COUNT(*) FROM failed_urls"
+            ).fetchone()[0]
+            conn.close()
+        except Exception:
+            pass
+    return {"articles": total_articles, "failed": total_failed}
 
 
 # =============================================================================
@@ -319,7 +454,7 @@ HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 
 
 # =============================================================================
-#  MODE 1: ThreadPool (default — fastest for CPU-bound I/O on Windows)
+#  MODE 1: ThreadPool
 # =============================================================================
 
 def _fetch_url_sync(url: str, timeout: int = 15) -> Optional[str]:
@@ -334,7 +469,10 @@ def _fetch_url_sync(url: str, timeout: int = 15) -> Optional[str]:
 
 
 def _extract_page_sync(url: str, meta: Dict) -> Dict:
-    result = {'url': url, 'title': '', 'published_date': '', 'article_content': '', 'failed': False, 'fail_reason': ''}
+    result = {
+        'url': url, 'title': '', 'published_date': '',
+        'article_content': '', 'failed': False, 'fail_reason': ''
+    }
     try:
         r = requests.get(url, timeout=10, headers=HEADERS)
         if r.status_code == 200:
@@ -355,13 +493,12 @@ def _extract_page_sync(url: str, meta: Dict) -> Dict:
 
 
 def _crawl_sitemaps_threadpool(domain: str, existing_urls: Set[str]) -> tuple:
-    all_urls: Set[str] = set()
-    urls_metadata: Dict[str, Dict] = {}
+    all_urls:      Set[str]    = set()
+    urls_metadata: Dict        = {}
     failed_sitemaps: List[str] = []
 
     visited, queue = set(), []
 
-    # Step 1: get robots.txt
     robots_content = _fetch_url_sync(f"{domain}/robots.txt", timeout=10) or ""
     matches = re.findall(r'[Ss]itemap:\s*(https?://\S+)', robots_content)
     if matches:
@@ -369,21 +506,19 @@ def _crawl_sitemaps_threadpool(domain: str, existing_urls: Set[str]) -> tuple:
         logger.info(f"Found {len(queue)} sitemap(s) in robots.txt")
     else:
         queue = [
-            f"{domain}/sitemap.xml", f"{domain}/sitemap_index.xml",
+            f"{domain}/sitemap.xml",       f"{domain}/sitemap_index.xml",
             f"{domain}/sitemap/sitemap.xml", f"{domain}/sitemap/sitemap_index.xml",
-            f"{domain}/sitemap-0.xml", f"{domain}/sitemap1.xml",
-            f"{domain}/news_sitemap.xml", f"{domain}/sitemap_news.xml",
+            f"{domain}/sitemap-0.xml",     f"{domain}/sitemap1.xml",
+            f"{domain}/news_sitemap.xml",  f"{domain}/sitemap_news.xml",
         ]
         logger.info("No sitemaps in robots.txt — trying common locations")
 
-    # Step 2: crawl sitemap tree
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         while queue and len(visited) < 200:
             to_fetch = [u for u in queue if u not in visited]
-            queue = []
+            queue    = []
             if not to_fetch:
                 break
-
             futures = {pool.submit(_fetch_url_sync, u): u for u in to_fetch}
             for future, sm_url in futures.items():
                 visited.add(sm_url)
@@ -392,9 +527,10 @@ def _crawl_sitemaps_threadpool(domain: str, existing_urls: Set[str]) -> tuple:
                     failed_sitemaps.append(sm_url)
                     logger.warning(f"Failed sitemap: {sm_url}")
                     continue
-                logger.info(f"Sitemap: {sm_url}")
+                logger.info(f"Sitemap OK: {sm_url}")
                 urls, subsitemaps, url_meta = _parse_sitemap_xml(content)
                 for url in urls:
+                    # Only add URLs we have never seen before
                     if url not in existing_urls:
                         all_urls.add(url)
                         if url in url_meta:
@@ -405,29 +541,39 @@ def _crawl_sitemaps_threadpool(domain: str, existing_urls: Set[str]) -> tuple:
 
 
 def run_threadpool(site: Dict):
-    domain      = site['domain']
-    db_file     = site['db_file']
-    pct         = site.get('process_percentage', 100.0)
+    domain  = site['domain']
+    db_file = site['db_file']
+    pct     = site.get('process_percentage', 100.0)
 
-    os.makedirs(os.path.dirname(db_file) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
     _init_db(db_file)
 
+    # Load ALL previously seen URLs (success + failed) for deduplication
     existing_urls = _load_all_existing_urls(db_file)
-    logger.info(f"[threadpool][{domain}] {len(existing_urls)} existing URLs")
+    stats_before  = _db_stats(db_file)
+    logger.info(f"[{domain}] DB has {stats_before['articles']} articles, "
+                f"{stats_before['failed']} failed URLs before this run")
 
-    all_urls, urls_metadata, failed_sitemaps = _crawl_sitemaps_threadpool(domain, existing_urls)
+    all_urls, urls_metadata, failed_sitemaps = _crawl_sitemaps_threadpool(
+        domain, existing_urls
+    )
 
-    # Save failed sitemaps
     for sm in failed_sitemaps:
         _insert_failed(db_file, sm, "Sitemap fetch failed")
 
+    # new_urls = sitemap URLs minus everything already in DB
     new_urls = [u for u in all_urls if u not in existing_urls]
-    logger.info(f"[threadpool][{domain}] {len(new_urls)} new URLs to process")
+    logger.info(f"[{domain}] {len(new_urls)} new URLs found (not in DB yet)")
+
+    if not new_urls:
+        logger.info(f"[{domain}] Nothing new to scrape — skipping.")
+        _git_commit_and_push(db_file, domain)
+        return
 
     if pct < 100.0:
         count    = max(1, int(pct / 100.0 * len(new_urls)))
         new_urls = random.sample(new_urls, count)
-        logger.info(f"[threadpool][{domain}] Sampling {pct}% -> {count} URLs")
+        logger.info(f"[{domain}] Sampling {pct}% → {count} URLs")
 
     saved = failed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -437,7 +583,7 @@ def run_threadpool(site: Dict):
         }
         done = 0
         for future in concurrent.futures.as_completed(futures):
-            done += 1
+            done  += 1
             result = future.result()
             if result['failed']:
                 failed += 1
@@ -449,21 +595,23 @@ def run_threadpool(site: Dict):
                 failed += 1
                 _insert_failed(db_file, result['url'], 'Empty article content')
             if done % BATCH_SIZE == 0 or done == len(new_urls):
-                logger.info(f"[threadpool][{domain}] Progress: {done}/{len(new_urls)}")
+                logger.info(f"[{domain}] Progress {done}/{len(new_urls)} "
+                            f"— saved {saved}, failed {failed}")
 
     _log_summary(domain, db_file, saved, failed)
+    _git_commit_and_push(db_file, domain)
 
 
 # =============================================================================
 #  MODE 2: Asyncio
 # =============================================================================
 
-async def _fetch_text_async(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                             url: str, timeout: int = 15) -> Optional[str]:
+async def _fetch_text_async(session, sem, url: str, timeout: int = 15) -> Optional[str]:
     try:
         async with sem:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
-                                   headers=HEADERS) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout), headers=HEADERS
+            ) as resp:
                 if resp.status == 200:
                     return await resp.text(errors='replace')
                 logger.warning(f"HTTP {resp.status}: {url}")
@@ -472,16 +620,20 @@ async def _fetch_text_async(session: aiohttp.ClientSession, sem: asyncio.Semapho
     return None
 
 
-async def _extract_page_async(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
-                               url: str, meta: Dict) -> Dict:
-    result = {'url': url, 'title': '', 'published_date': '', 'article_content': '',
-              'failed': False, 'fail_reason': ''}
+async def _extract_page_async(session, sem, url: str, meta: Dict) -> Dict:
+    result = {
+        'url': url, 'title': '', 'published_date': '',
+        'article_content': '', 'failed': False, 'fail_reason': ''
+    }
     try:
         async with sem:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                   headers=HEADERS) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=10), headers=HEADERS
+            ) as resp:
                 if resp.status == 200:
-                    soup = BeautifulSoup(await resp.text(errors='replace'), 'html.parser')
+                    soup = BeautifulSoup(
+                        await resp.text(errors='replace'), 'html.parser'
+                    )
                     result['title']           = _extract_title_from_soup(soup, meta)
                     result['article_content'] = _extract_content_from_soup(soup)
                     result['published_date']  = _best_date(url, meta, soup)
@@ -502,40 +654,41 @@ async def run_asyncio(site: Dict):
     db_file = site['db_file']
     pct     = site.get('process_percentage', 100.0)
 
-    os.makedirs(os.path.dirname(db_file) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
     _init_db(db_file)
 
     existing_urls = _load_all_existing_urls(db_file)
-    logger.info(f"[asyncio][{domain}] {len(existing_urls)} existing URLs")
+    stats_before  = _db_stats(db_file)
+    logger.info(f"[{domain}] DB has {stats_before['articles']} articles before this run")
 
     sem = asyncio.Semaphore(ASYNCIO_CONCURRENCY)
-    all_urls: Set[str]       = set()
-    urls_metadata: Dict      = {}
-    failed_sitemaps: List[str] = []
+    all_urls:        Set[str]    = set()
+    urls_metadata:   Dict        = {}
+    failed_sitemaps: List[str]   = []
 
     async with aiohttp.ClientSession() as session:
-        # Robots
-        robots = await _fetch_text_async(session, sem, f"{domain}/robots.txt", timeout=10) or ""
+        robots = await _fetch_text_async(
+            session, sem, f"{domain}/robots.txt", timeout=10
+        ) or ""
         matches = re.findall(r'[Ss]itemap:\s*(https?://\S+)', robots)
-        queue = list(set(matches)) if matches else [
-            f"{domain}/sitemap.xml", f"{domain}/sitemap_index.xml",
+        queue   = list(set(matches)) if matches else [
+            f"{domain}/sitemap.xml",        f"{domain}/sitemap_index.xml",
             f"{domain}/sitemap/sitemap.xml", f"{domain}/sitemap/sitemap_index.xml",
-            f"{domain}/sitemap-0.xml", f"{domain}/sitemap1.xml",
-            f"{domain}/news_sitemap.xml", f"{domain}/sitemap_news.xml",
+            f"{domain}/sitemap-0.xml",      f"{domain}/sitemap1.xml",
+            f"{domain}/news_sitemap.xml",   f"{domain}/sitemap_news.xml",
         ]
 
-        # Sitemap tree
         visited = set()
         while queue and len(visited) < 200:
             current = queue.pop(0)
             if current in visited:
                 continue
             visited.add(current)
-            logger.info(f"Sitemap: {current}")
             content = await _fetch_text_async(session, sem, current)
             if not content:
                 failed_sitemaps.append(current)
                 continue
+            logger.info(f"Sitemap OK: {current}")
             urls, subsitemaps, url_meta = _parse_sitemap_xml(content)
             for url in urls:
                 if url not in existing_urls:
@@ -548,7 +701,12 @@ async def run_asyncio(site: Dict):
             _insert_failed(db_file, sm, "Sitemap fetch failed")
 
         new_urls = [u for u in all_urls if u not in existing_urls]
-        logger.info(f"[asyncio][{domain}] {len(new_urls)} new URLs to process")
+        logger.info(f"[{domain}] {len(new_urls)} new URLs to process")
+
+        if not new_urls:
+            logger.info(f"[{domain}] Nothing new — skipping.")
+            _git_commit_and_push(db_file, domain)
+            return
 
         if pct < 100.0:
             count    = max(1, int(pct / 100.0 * len(new_urls)))
@@ -556,9 +714,11 @@ async def run_asyncio(site: Dict):
 
         saved = failed = 0
         for i in range(0, len(new_urls), BATCH_SIZE):
-            batch = new_urls[i:i + BATCH_SIZE]
+            batch   = new_urls[i:i + BATCH_SIZE]
             results = await asyncio.gather(
-                *[_extract_page_async(session, sem, url, urls_metadata.get(url, {})) for url in batch],
+                *[_extract_page_async(
+                    session, sem, url, urls_metadata.get(url, {})
+                ) for url in batch],
                 return_exceptions=True
             )
             for res in results:
@@ -572,13 +732,16 @@ async def run_asyncio(site: Dict):
                     else:
                         failed += 1
                         _insert_failed(db_file, res['url'], 'Empty article content')
-            logger.info(f"[asyncio][{domain}] Progress: {min(i+BATCH_SIZE, len(new_urls))}/{len(new_urls)}")
+            logger.info(
+                f"[{domain}] Progress {min(i+BATCH_SIZE, len(new_urls))}/{len(new_urls)}"
+            )
 
     _log_summary(domain, db_file, saved, failed)
+    _git_commit_and_push(db_file, domain)
 
 
 # =============================================================================
-#  MODE 3: Normal (simple single-threaded requests)
+#  MODE 3: Normal (single-threaded)
 # =============================================================================
 
 def run_normal(site: Dict):
@@ -586,24 +749,24 @@ def run_normal(site: Dict):
     db_file = site['db_file']
     pct     = site.get('process_percentage', 100.0)
 
-    os.makedirs(os.path.dirname(db_file) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
     _init_db(db_file)
 
     existing_urls = _load_all_existing_urls(db_file)
-    logger.info(f"[normal][{domain}] {len(existing_urls)} existing URLs")
+    stats_before  = _db_stats(db_file)
+    logger.info(f"[{domain}] DB has {stats_before['articles']} articles before this run")
 
-    all_urls: Set[str]         = set()
-    urls_metadata: Dict        = {}
-    failed_sitemaps: List[str] = []
+    all_urls:        Set[str]    = set()
+    urls_metadata:   Dict        = {}
+    failed_sitemaps: List[str]   = []
 
-    # Robots
     robots = _fetch_url_sync(f"{domain}/robots.txt", timeout=10) or ""
     matches = re.findall(r'[Ss]itemap:\s*(https?://\S+)', robots)
-    queue = list(set(matches)) if matches else [
-        f"{domain}/sitemap.xml", f"{domain}/sitemap_index.xml",
+    queue   = list(set(matches)) if matches else [
+        f"{domain}/sitemap.xml",        f"{domain}/sitemap_index.xml",
         f"{domain}/sitemap/sitemap.xml", f"{domain}/sitemap/sitemap_index.xml",
-        f"{domain}/sitemap-0.xml", f"{domain}/sitemap1.xml",
-        f"{domain}/news_sitemap.xml", f"{domain}/sitemap_news.xml",
+        f"{domain}/sitemap-0.xml",      f"{domain}/sitemap1.xml",
+        f"{domain}/news_sitemap.xml",   f"{domain}/sitemap_news.xml",
     ]
 
     visited = set()
@@ -612,11 +775,11 @@ def run_normal(site: Dict):
         if current in visited:
             continue
         visited.add(current)
-        logger.info(f"Sitemap: {current}")
         content = _fetch_url_sync(current)
         if not content:
             failed_sitemaps.append(current)
             continue
+        logger.info(f"Sitemap OK: {current}")
         urls, subsitemaps, url_meta = _parse_sitemap_xml(content)
         for url in urls:
             if url not in existing_urls:
@@ -629,7 +792,12 @@ def run_normal(site: Dict):
         _insert_failed(db_file, sm, "Sitemap fetch failed")
 
     new_urls = [u for u in all_urls if u not in existing_urls]
-    logger.info(f"[normal][{domain}] {len(new_urls)} new URLs to process")
+    logger.info(f"[{domain}] {len(new_urls)} new URLs to process")
+
+    if not new_urls:
+        logger.info(f"[{domain}] Nothing new — skipping.")
+        _git_commit_and_push(db_file, domain)
+        return
 
     if pct < 100.0:
         count    = max(1, int(pct / 100.0 * len(new_urls)))
@@ -648,20 +816,24 @@ def run_normal(site: Dict):
             failed += 1
             _insert_failed(db_file, result['url'], 'Empty article content')
         if i % BATCH_SIZE == 0 or i == len(new_urls):
-            logger.info(f"[normal][{domain}] Progress: {i}/{len(new_urls)}")
+            logger.info(f"[{domain}] Progress {i}/{len(new_urls)}")
 
     _log_summary(domain, db_file, saved, failed)
+    _git_commit_and_push(db_file, domain)
 
 
 # =============================================================================
-#  Shared summary logger
+#  Summary logger
 # =============================================================================
 
 def _log_summary(domain: str, base_db_file: str, saved: int, failed: int):
-    logger.info(f"[{domain}] Done — saved: {saved}, failed: {failed}")
+    stats = _db_stats(base_db_file)
+    logger.info(f"[{domain}] Run complete — +{saved} new articles, {failed} failed")
+    logger.info(f"[{domain}] DB totals — {stats['articles']} articles, "
+                f"{stats['failed']} failed URLs across all shards")
     for db_path in _all_db_files(base_db_file):
         size_mb = os.path.getsize(db_path) / (1024 * 1024)
-        logger.info(f"  Shard: {db_path}  ({size_mb:.1f} MB)")
+        logger.info(f"  Shard: {db_path}  ({size_mb:.2f} MB)")
 
 
 # =============================================================================
@@ -675,11 +847,13 @@ def main():
         return
 
     logger.info("=" * 60)
-    logger.info(f"Started  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Mode     : {EXECUTION_MODE}")
-    logger.info(f"Sites    : {len(sites)}")
-    logger.info(f"Max DB   : {MAX_DB_BYTES // (1024*1024)} MB per shard")
-    logger.info(f"Save failed URLs: {SAVE_FAILED_URLS}")
+    logger.info(f"Started        : {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    logger.info(f"Mode           : {EXECUTION_MODE}")
+    logger.info(f"Sites          : {len(sites)}")
+    logger.info(f"DB folder      : {DB_FOLDER}  (committed to repo)")
+    logger.info(f"Max DB shard   : {MAX_DB_BYTES // (1024*1024)} MB")
+    logger.info(f"Auto git push  : {AUTO_GIT_PUSH}")
+    logger.info(f"Save failed    : {SAVE_FAILED_URLS}")
     logger.info("=" * 60)
 
     for site in sites:
@@ -688,10 +862,10 @@ def main():
                 asyncio.run(run_asyncio(site))
             elif EXECUTION_MODE == "normal":
                 run_normal(site)
-            else:  # threadpool (default)
+            else:
                 run_threadpool(site)
         except Exception as e:
-            logger.error(f"Failed: {site['domain']}: {e}")
+            logger.error(f"Failed processing {site['domain']}: {e}")
 
     logger.info("All sites done.")
 
