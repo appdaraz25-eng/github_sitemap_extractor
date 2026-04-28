@@ -75,14 +75,12 @@ AUTO_GIT_PUSH = True
 # =============================================================================
 
 def load_sites_from_file(filepath: str) -> List[Dict]:
+    # Check if file exists - if not, raise error instead of creating sample
     if not os.path.exists(filepath):
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write("# Add one news site URL per line\n")
-            f.write("# Lines starting with # are ignored\n")
-            f.write("https://banglaedition.com\n")
-            f.write("https://dailyamardesh.com\n")
-        logger.info(f"Created sample {filepath} — edit it and re-run.")
-
+        error_msg = f"ERROR: {filepath} not found. Please create this file with your news site URLs (one per line, lines starting with # are ignored)."
+        logger.error(error_msg)
+        raise FileNotFoundError(error_msg)
+    
     sites = []
     with open(filepath, 'r', encoding='utf-8') as f:
         for raw in f:
@@ -99,6 +97,12 @@ def load_sites_from_file(filepath: str) -> List[Dict]:
                 "db_file":            os.path.join(DB_FOLDER, f"{safe}.db"),
                 "process_percentage": PROCESS_PERCENTAGE,
             })
+    
+    if not sites:
+        error_msg = f"ERROR: {filepath} exists but contains no valid site URLs. Please add at least one URL (one per line, lines starting with # are ignored)."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
     logger.info(f"Loaded {len(sites)} site(s) from {filepath}")
     return sites
 
@@ -841,9 +845,10 @@ def _log_summary(domain: str, base_db_file: str, saved: int, failed: int):
 # =============================================================================
 
 def main():
-    sites = load_sites_from_file(SITES_FILE)
-    if not sites:
-        logger.error(f"No sites found in {SITES_FILE}. Add URLs and re-run.")
+    try:
+        sites = load_sites_from_file(SITES_FILE)
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(str(e))
         return
 
     logger.info("=" * 60)
