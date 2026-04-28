@@ -1,5 +1,6 @@
 # One site per line
 https://prothomalo.com
+https://bangla.thedailystar.net
 https://dailyamardesh.com
 https://banglaedition.com
 https://www.prothomalo.com
