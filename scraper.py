@@ -79,8 +79,8 @@ def load_sites_from_file(filepath: str) -> List[Dict]:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write("# Add one news site URL per line\n")
             f.write("# Lines starting with # are ignored\n")
-            f.write("https://prothomalo.com\n")
-            f.write("https://bdnews24.com\n")
+            f.write("https://banglaedition.com\n")
+            f.write("https://dailyamardesh.com\n")
         logger.info(f"Created sample {filepath} — edit it and re-run.")
 
     sites = []
