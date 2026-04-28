@@ -2,17 +2,22 @@ name: News Scraper
 
 on:
   schedule:
-    - cron: '43 16 * * *'   # 4:27 PM UTC = 10:27 PM UTC+6
-  workflow_dispatch:          # lets you trigger manually too
+    - cron: '43 16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 🔥 REQUIRED (fixes 403)
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 350      # safety limit
+    timeout-minutes: 350
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # ensure token is used
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,12 +31,15 @@ jobs:
       - name: Run scraper
         run: python scraper.py
 
-      - name: Upload DB output
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: scraper-output-${{ github.run_id }}
-          path: |
-            output/*.db
-            logs/
-          retention-days: 30
+      - name: Commit changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add output/*.db logs/ || true
+
+          git diff --cached --quiet || git commit -m "Update scraped data"
+
+      - name: Push changes
+        run: |
+          git push
