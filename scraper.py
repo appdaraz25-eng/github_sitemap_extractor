@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 #  CONFIGURATION
 # =============================================================================
 
-# Execution mode: "threadpool" (default) | "asyncio" | "normal"
-EXECUTION_MODE = "threadpool"
+# Execution mode: "normal" (default) | "asyncio" | "threadpool"
+EXECUTION_MODE = "normal"
 
 # Sites file — sits in repo root alongside scraper.py
 SITES_FILE = "news_sites_list.txt"
