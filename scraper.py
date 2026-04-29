@@ -46,8 +46,8 @@ SITES_FILE = "news_sites_list.txt"
 # .db files folder — committed back to the repo after every run
 DB_FOLDER = "data"
 
-# Max DB shard size in bytes (100 MB)
-MAX_DB_BYTES = 100 * 1024 * 1024
+# Max DB shard size in bytes (50 MB)
+MAX_DB_BYTES = 50 * 1024 * 1024
 
 # ThreadPool workers
 MAX_WORKERS = 20
