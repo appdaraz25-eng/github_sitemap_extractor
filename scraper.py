@@ -59,7 +59,7 @@ ASYNCIO_CONCURRENCY = 50
 BATCH_SIZE = 50
 
 # Percentage of NEW urls to process per run (100.0 = all new urls)
-PROCESS_PERCENTAGE = 20.0
+PROCESS_PERCENTAGE = 100.0
 
 # Save failed URLs to DB so they are never retried
 SAVE_FAILED_URLS = True
