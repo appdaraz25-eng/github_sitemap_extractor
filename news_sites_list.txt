@@ -1,4 +1,5 @@
 # One site per line
-https://bangla.thedailystar.net
+# https://bangla.thedailystar.net
+https://www.dailyamardesh.com/
 
 
